@@ -49,6 +49,7 @@ class TestClassifyStatus:
             (502, ErrorClass.UPSTREAM_UNAVAILABLE),
             (503, ErrorClass.UPSTREAM_UNAVAILABLE),
             (504, ErrorClass.UPSTREAM_UNAVAILABLE),
+            (529, ErrorClass.UPSTREAM_UNAVAILABLE),
             (408, ErrorClass.TIMEOUT),
         ],
     )

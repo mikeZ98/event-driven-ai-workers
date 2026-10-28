@@ -1,6 +1,6 @@
 """Failure classification and exponential backoff with jitter.
 
-Transient failures (HTTP 408/429/500/502/503/504, timeouts, dropped connections) are
+Transient failures (HTTP 408/429/500/502/503/504/529, timeouts, dropped connections) are
 retried; everything else is a poison pill routed straight to the dead-letter queue.
 Unknown exceptions are deliberately *not* retried: a bug fails fast into the DLQ,
 where the original task is preserved for replay, instead of burning the retry budget.
@@ -51,7 +51,8 @@ class FailureClassification:
     retry_after_s: float | None = None
 
 
-_UNAVAILABLE_STATUSES = frozenset({500, 502, 503, 504})
+# 529 is the LLM provider's ``overloaded_error``: capacity, not a bad request.
+_UNAVAILABLE_STATUSES = frozenset({500, 502, 503, 504, 529})
 
 
 def classify_status(status_code: int, retry_after_s: float | None = None) -> FailureClassification:
