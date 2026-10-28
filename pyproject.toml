@@ -116,7 +116,11 @@ addopts = [
   # asyncio's self-pipe uses an AF_UNIX socketpair; everything else is blocked.
   "--allow-unix-socket",
 ]
-filterwarnings = ["error"]
+filterwarnings = [
+  "error",
+  # pytest-socket warns before raising SocketBlockedError; let the error surface instead.
+  "ignore:A test tried to use socket.socket.:UserWarning",
+]
 
 [tool.coverage.run]
 branch = true
