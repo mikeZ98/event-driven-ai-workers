@@ -1,0 +1,136 @@
+[project]
+name = "event-driven-ai-workers"
+version = "0.1.0"
+description = "Asynchronous ARQ/Redis worker ecosystem for heavy AI workloads with retries, a dead-letter queue and Prometheus metrics."
+readme = "README.md"
+authors = [{ name = "mikeZ98", email = "145975972+mikeZ98@users.noreply.github.com" }]
+requires-python = ">=3.12"
+classifiers = [
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Framework :: FastAPI",
+  "Framework :: AsyncIO",
+  "Typing :: Typed",
+]
+dependencies = [
+  "fastapi>=0.115",
+  "arq>=0.26",
+  # arq pins redis[hiredis]<6; keep the ceiling explicit so upgrades are deliberate.
+  "redis>=5.2,<6",
+  "pydantic>=2.7",
+  "prometheus-client>=0.21",
+  "httpx>=0.28",
+  "tenacity>=9.0",
+  "structlog>=24.4",
+]
+
+[dependency-groups]
+dev = [
+  "pytest>=8.3",
+  "pytest-asyncio>=0.25",
+  "pytest-cov>=6.0",
+  "pytest-socket>=0.7",
+  "mypy>=1.13",
+  "ruff>=0.8",
+  "bandit[toml]>=1.8",
+]
+
+[tool.uv]
+default-groups = ["dev"]
+
+[build-system]
+requires = ["uv_build>=0.11,<0.12"]
+build-backend = "uv_build"
+
+# ---------------------------------------------------------------------------
+# Ruff
+# ---------------------------------------------------------------------------
+[tool.ruff]
+# Lint against the minimum supported interpreter; development runs on 3.13.
+target-version = "py312"
+line-length = 100
+src = ["src", "tests"]
+cache-dir = ".cache/ruff"
+
+[tool.ruff.lint]
+select = [
+  "E", "W", "F", "I", "N", "UP", "B", "A", "C4", "S", "SIM", "PT", "RET", "ARG", "PTH",
+  "PL", "RUF", "ASYNC", "TRY", "PERF", "FBT", "T20", "BLE", "ERA", "DTZ", "PIE", "PGH",
+  "ISC", "RSE", "TID", "LOG", "G", "SLOT", "FURB",
+]
+ignore = ["PLR0913", "TRY003"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests drive git/bash through subprocess with fixed argv and no shell.
+"tests/**" = ["S101", "S105", "S106", "S603", "S607", "PLR2004", "ARG001", "FBT"]
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "all"
+
+[tool.ruff.lint.isort]
+known-first-party = ["event_driven_ai_workers"]
+
+[tool.ruff.format]
+docstring-code-format = true
+
+# ---------------------------------------------------------------------------
+# Mypy
+# ---------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.12"
+strict = true
+cache_dir = ".cache/mypy"
+mypy_path = "src"
+packages = ["event_driven_ai_workers"]
+plugins = ["pydantic.mypy"]
+warn_unreachable = true
+warn_unused_configs = true
+extra_checks = true
+enable_error_code = [
+  "ignore-without-code",
+  "redundant-expr",
+  "truthy-bool",
+  "possibly-undefined",
+  "unused-awaitable",
+]
+
+[tool.pydantic-mypy]
+init_forbid_extra = true
+init_typed = true
+warn_required_dynamic_aliases = true
+
+# ---------------------------------------------------------------------------
+# Pytest / coverage (hermetic: inet sockets disabled, no live Redis or LLM calls)
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+cache_dir = ".cache/pytest"
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+addopts = [
+  "-ra",
+  "--strict-markers",
+  "--strict-config",
+  "--disable-socket",
+  # asyncio's self-pipe uses an AF_UNIX socketpair; everything else is blocked.
+  "--allow-unix-socket",
+]
+filterwarnings = ["error"]
+
+[tool.coverage.run]
+branch = true
+source = ["event_driven_ai_workers"]
+data_file = ".cache/coverage/.coverage"
+
+[tool.coverage.report]
+fail_under = 90
+show_missing = true
+exclude_also = ["if TYPE_CHECKING:", "raise NotImplementedError", "@overload"]
+
+# ---------------------------------------------------------------------------
+# Bandit
+# ---------------------------------------------------------------------------
+[tool.bandit]
+targets = ["src"]
+exclude_dirs = ["tests", ".cache"]
