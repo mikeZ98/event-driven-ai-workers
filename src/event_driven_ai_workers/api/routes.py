@@ -1,6 +1,8 @@
 """Producer endpoints: task submission, state polling, health and metrics.
 
-Request bodies are read raw and parsed with ``model_validate_json``: the schemas are
+Submissions pass the guardrails before any Redis call: the body is read under a byte
+cap and screened for size and content; backpressure is checked before the key is
+claimed. Request bodies are read raw and parsed with ``model_validate_json``: the schemas are
 ``strict`` and FastAPI's Python-mode body parsing would reject JSON-native encodings.
 Responses are written with ``model_dump_json`` for the same reason.
 """
@@ -9,6 +11,7 @@ import asyncio
 import contextlib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from functools import partial
 from typing import Annotated, Any, cast
 from uuid import UUID
 
@@ -32,6 +35,13 @@ from event_driven_ai_workers.api.submission import (
 )
 from event_driven_ai_workers.core import WorkerSettings, health_check_key
 from event_driven_ai_workers.core.ports import resolve
+from event_driven_ai_workers.guardrails import (
+    DocumentTooLargeError,
+    PayloadGuard,
+    PayloadTooLargeError,
+    QueueSaturatedError,
+    RejectedContentError,
+)
 from event_driven_ai_workers.schemas import (
     IdempotencyKey,
     SummarizationRequest,
@@ -55,6 +65,7 @@ class ApiServices:
     worker: WorkerSettings
     pool: ArqRedis
     submitter: TaskSubmitter
+    guard: PayloadGuard
     metrics: ApiMetrics
     registry: CollectorRegistry
 
@@ -142,6 +153,14 @@ async def _submit(
             "idempotency-key-mismatch",
             "This Idempotency-Key was already used for a different request.",
         ) from None
+    except QueueSaturatedError as exc:
+        services.metrics.submission(task_type, SubmissionOutcome.SATURATED)
+        raise ProblemError(
+            503,
+            "queue-saturated",
+            "The task queue is at capacity; retry later.",
+            headers={"retry-after": str(exc.retry_after_s)},
+        ) from None
     except IdempotencyKeyInUseError:
         services.metrics.submission(task_type, SubmissionOutcome.CONFLICT)
         raise ProblemError(
@@ -153,6 +172,28 @@ async def _submit(
     except RedisError:
         services.metrics.submission(task_type, SubmissionOutcome.UNAVAILABLE)
         raise unavailable() from None
+
+
+async def _screen_summarization(request: Request, services: ApiServices) -> SummarizationRequest:
+    guard = services.guard
+    record = partial(services.metrics.submission, TaskType.SUMMARIZATION)
+    try:
+        raw = await guard.read(
+            request.stream(), content_length=request.headers.get("content-length")
+        )
+        return guard.summarization(raw)
+    except PayloadTooLargeError as exc:
+        record(SubmissionOutcome.TOO_LARGE)
+        raise ProblemError(413, "payload-too-large", str(exc)) from None
+    except DocumentTooLargeError as exc:
+        record(SubmissionOutcome.TOO_LARGE)
+        raise ProblemError(413, "document-too-large", str(exc)) from None
+    except RejectedContentError as exc:
+        record(SubmissionOutcome.INVALID)
+        raise ProblemError(422, "rejected-content", f"Rejected content: {exc}") from None
+    except ValidationError as exc:
+        record(SubmissionOutcome.INVALID)
+        raise ProblemError(422, "invalid-request", validation_detail(exc.errors())) from None
 
 
 def _accepted(request: Request, services: ApiServices, submission: Submission) -> Response:
@@ -170,7 +211,7 @@ def _accepted(request: Request, services: ApiServices, submission: Submission) -
     f"{API_PREFIX}/tasks/summarize",
     status_code=202,
     summary="Queue a document summarization task",
-    responses={202: {"model": TaskAccepted}, **_problems(400, 409, 422, 503)},
+    responses={202: {"model": TaskAccepted}, **_problems(400, 409, 413, 422, 503)},
     openapi_extra={
         "requestBody": {
             "required": True,
@@ -181,11 +222,7 @@ def _accepted(request: Request, services: ApiServices, submission: Submission) -
 async def submit_summarization(
     request: Request, services: Services, idempotency_key: IdempotencyKeyHeader
 ) -> Response:
-    try:
-        summarization = SummarizationRequest.model_validate_json(await request.body())
-    except ValidationError as exc:
-        services.metrics.submission(TaskType.SUMMARIZATION, SubmissionOutcome.INVALID)
-        raise ProblemError(422, "invalid-request", validation_detail(exc.errors())) from None
+    summarization = await _screen_summarization(request, services)
     submission = await _submit(services, TaskType.SUMMARIZATION, summarization, idempotency_key)
     return _accepted(request, services, submission)
 

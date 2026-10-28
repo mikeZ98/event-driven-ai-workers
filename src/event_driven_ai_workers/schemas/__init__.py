@@ -3,6 +3,7 @@
 from event_driven_ai_workers.schemas._base import UtcDatetime, WorkerModel, utc_now
 from event_driven_ai_workers.schemas.dead_letter import DeadLetterEnvelope
 from event_driven_ai_workers.schemas.summarization import (
+    MAX_DOCUMENT_CHARS,
     FocusArea,
     SummarizationRequest,
     SummarizationResult,
@@ -16,6 +17,7 @@ from event_driven_ai_workers.schemas.task import (
 )
 
 __all__ = [
+    "MAX_DOCUMENT_CHARS",
     "DeadLetterEnvelope",
     "FocusArea",
     "IdempotencyKey",

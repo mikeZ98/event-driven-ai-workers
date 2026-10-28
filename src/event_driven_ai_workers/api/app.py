@@ -31,6 +31,7 @@ from event_driven_ai_workers.api.routes import (
 )
 from event_driven_ai_workers.api.submission import TaskSubmitter
 from event_driven_ai_workers.core import RedisSettings, WorkerSettings
+from event_driven_ai_workers.guardrails import Backpressure, GuardrailSettings, PayloadGuard
 from event_driven_ai_workers.tools.metrics import create_registry
 
 PoolFactory = Callable[[], Awaitable[ArqRedis]]
@@ -70,6 +71,7 @@ def create_app(
     api: ApiSettings | None = None,
     worker: WorkerSettings | None = None,
     redis: RedisSettings | None = None,
+    guardrails: GuardrailSettings | None = None,
     *,
     pool_factory: PoolFactory | None = None,
     registry: CollectorRegistry | None = None,
@@ -82,6 +84,7 @@ def create_app(
     api = api or ApiSettings()
     worker = worker or WorkerSettings()
     redis = redis or RedisSettings()
+    guardrails = guardrails or GuardrailSettings()
     registry = create_registry() if registry is None else registry
     metrics = ApiMetrics(registry)
     open_pool: PoolFactory = pool_factory or partial(
@@ -91,11 +94,18 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         pool = await open_pool()
+        backpressure = Backpressure(pool, queue_name=worker.queue_name, settings=guardrails)
         app.state.services = ApiServices(
             settings=api,
             worker=worker,
             pool=pool,
-            submitter=TaskSubmitter(pool, worker=worker, key_prefix=api.idempotency_key_prefix),
+            submitter=TaskSubmitter(
+                pool,
+                worker=worker,
+                key_prefix=api.idempotency_key_prefix,
+                backpressure=backpressure,
+            ),
+            guard=PayloadGuard(guardrails),
             metrics=metrics,
             registry=registry,
         )

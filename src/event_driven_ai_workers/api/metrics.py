@@ -14,6 +14,8 @@ class SubmissionOutcome(StrEnum):
     REPLAYED = "replayed"
     INVALID = "invalid"
     CONFLICT = "conflict"
+    TOO_LARGE = "too_large"
+    SATURATED = "saturated"
     UNAVAILABLE = "unavailable"
 
 

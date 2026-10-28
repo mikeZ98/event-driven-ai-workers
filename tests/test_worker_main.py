@@ -5,6 +5,7 @@ import os
 import runpy
 import shutil
 import signal
+import socket
 import tempfile
 from collections.abc import Iterator
 from pathlib import Path
@@ -13,6 +14,7 @@ from typing import Any
 import fakeredis
 import httpx
 import pytest
+import uvicorn
 from prometheus_client import CollectorRegistry, Counter
 from redis.exceptions import ConnectionError as RedisConnectionError
 from uvicorn.importer import import_from_string
@@ -113,7 +115,7 @@ class TestMetricsServer:
 
     def test_tcp_listener_binds_host_and_port(self, monkeypatch: pytest.MonkeyPatch) -> None:
         bound: list[Any] = []
-        monkeypatch.setattr(worker_main.socket, "create_server", bound.append)
+        monkeypatch.setattr(socket, "create_server", bound.append)
 
         worker_main._bind(MetricsServerSettings(host="0.0.0.0", port=9200))  # noqa: S104
 
@@ -205,7 +207,7 @@ class TestRunWorker:
 class TestCli:
     def test_api_command_runs_uvicorn_factory(self, monkeypatch: pytest.MonkeyPatch) -> None:
         calls: list[tuple[Any, ...]] = []
-        monkeypatch.setattr(cli.uvicorn, "run", lambda *a, **k: calls.append((a, k)))
+        monkeypatch.setattr(uvicorn, "run", lambda *a, **k: calls.append((a, k)))
         monkeypatch.setenv("EDAW_API_PORT", "9000")
 
         assert cli.main(["api"]) == 0

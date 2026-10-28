@@ -18,6 +18,7 @@ from redis.asyncio import ConnectionPool
 
 from event_driven_ai_workers.api import ApiSettings, create_app
 from event_driven_ai_workers.core import WorkerSettings
+from event_driven_ai_workers.guardrails import GuardrailSettings
 
 
 @pytest.fixture(autouse=True)
@@ -90,7 +91,10 @@ def api_factory(
 
     @asynccontextmanager
     async def build(
-        api: ApiSettings | None = None, *, raise_app_exceptions: bool = True
+        api: ApiSettings | None = None,
+        guardrails: GuardrailSettings | None = None,
+        *,
+        raise_app_exceptions: bool = True,
     ) -> AsyncIterator[ApiHarness]:
         registry = CollectorRegistry()
 
@@ -98,7 +102,11 @@ def api_factory(
             return make_pool(redis_server)
 
         app = create_app(
-            api or ApiSettings(), fast_settings, pool_factory=open_pool, registry=registry
+            api or ApiSettings(),
+            fast_settings,
+            guardrails=guardrails,
+            pool_factory=open_pool,
+            registry=registry,
         )
         transport = httpx.ASGITransport(app=app, raise_app_exceptions=raise_app_exceptions)
         async with (

@@ -5,6 +5,10 @@ submission returns the original task instead of creating a new one. A replay als
 re-drives ``enqueue_task`` while the task is still ``PENDING``: that is a no-op while the
 arq job exists (its id is the idempotency key) and heals a submission interrupted
 between claiming the key and enqueueing.
+
+New submissions pass the backpressure check before claiming the key, so a refused
+request leaves the key free for its retry, and replays are still served while the
+queue is saturated.
 """
 
 import contextlib
@@ -17,6 +21,7 @@ from redis.exceptions import RedisError
 
 from event_driven_ai_workers.core import RedisTaskStateStore, WorkerSettings, enqueue_task
 from event_driven_ai_workers.core.ports import resolve
+from event_driven_ai_workers.guardrails import Backpressure
 from event_driven_ai_workers.schemas import (
     TaskPayload,
     TaskResult,
@@ -57,10 +62,18 @@ def fingerprint(task_type: TaskType, request: WorkerModel) -> str:
 class TaskSubmitter:
     """Turns validated requests into queued tasks, at most once per idempotency key."""
 
-    def __init__(self, pool: ArqRedis, *, worker: WorkerSettings, key_prefix: str) -> None:
+    def __init__(
+        self,
+        pool: ArqRedis,
+        *,
+        worker: WorkerSettings,
+        key_prefix: str,
+        backpressure: Backpressure | None = None,
+    ) -> None:
         self._pool = pool
         self._worker = worker
         self._key_prefix = key_prefix
+        self._backpressure = backpressure
         self.states = RedisTaskStateStore(
             pool, prefix=worker.state_key_prefix, ttl_s=worker.state_ttl_s
         )
@@ -86,7 +99,13 @@ class TaskSubmitter:
         return Submission(task=task, status=state.status, replayed=True)
 
     async def submit(self, task: TaskPayload, request_fingerprint: str) -> Submission:
-        """Claim ``task.idempotency_key`` and enqueue ``task``, or replay the earlier claim."""
+        """Claim ``task.idempotency_key`` and enqueue ``task``, or replay the earlier claim.
+
+        Raises :class:`~event_driven_ai_workers.guardrails.QueueSaturatedError` while the
+        queue is full.
+        """
+        if self._backpressure is not None:
+            await self._backpressure.admit()
         key = self._key(task.idempotency_key)
         record = IdempotencyRecord(fingerprint=request_fingerprint, task=task)
         claimed: bool | None = await resolve(
