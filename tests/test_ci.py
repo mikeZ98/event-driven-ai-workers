@@ -172,6 +172,9 @@ class TestGates:
         compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text())
         assert _jobs(workflow)["docker"]["env"]["IMAGE"] == compose["x-app"]["image"]
 
+    def test_docker_job_uploads_no_build_record(self, workflow: dict[str, Any]) -> None:
+        assert _jobs(workflow)["docker"]["env"]["DOCKER_BUILD_RECORD_UPLOAD"] == "false"
+
 
 class TestDrift:
     def test_toolchain_versions_match_the_repo(self, workflow: dict[str, Any]) -> None:

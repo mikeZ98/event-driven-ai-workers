@@ -131,6 +131,8 @@ jobs:
     env:
       # The tag docker-compose.yml runs, so the smoke test uses the image built here.
       IMAGE: event-driven-ai-workers:0.1.0
+      # build-push-action otherwise uploads a build-record artifact on every run.
+      DOCKER_BUILD_RECORD_UPLOAD: "false"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
