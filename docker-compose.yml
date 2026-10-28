@@ -1,0 +1,184 @@
+# Production-like local stack for event-driven-ai-workers.
+#
+#   docker compose up --build              api on 127.0.0.1:8000, one worker
+#   docker compose up --scale worker=3     more workers (metrics ports are ephemeral:
+#                                          `docker compose port --index 2 worker 9100`)
+#
+# Settings: non-secret defaults below can be overridden from the shell or a local .env
+# (compose interpolation). Secrets such as EDAW_LLM_API_KEY belong in .env only
+# (gitignored; see .env.example), passed through to the worker alone: the producer
+# never calls the LLM. The LLM runs simulated (no key, no network) unless
+# EDAW_LLM_MODE=live.
+
+name: event-driven-ai-workers
+
+# Queue topology and Redis DSN: the producer enqueues and polls with the same
+# WorkerSettings the workers consume with, so both services must share them exactly.
+x-queue-env: &queue-env
+  EDAW_REDIS_URL: redis://redis:6379/0
+  EDAW_WORKER_QUEUE_NAME: ${EDAW_WORKER_QUEUE_NAME:-edaw:queue}
+  EDAW_WORKER_DLQ_NAME: ${EDAW_WORKER_DLQ_NAME:-edaw:dlq}
+  EDAW_WORKER_STATE_KEY_PREFIX: ${EDAW_WORKER_STATE_KEY_PREFIX:-edaw:state:}
+  EDAW_WORKER_STATE_TTL_S: ${EDAW_WORKER_STATE_TTL_S:-86400}
+  EDAW_WORKER_DLQ_THRESHOLD: ${EDAW_WORKER_DLQ_THRESHOLD:-5}
+
+# Hardening shared by the application containers: non-root, immutable root
+# filesystem, no privileges, no capabilities.
+x-app: &app
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: event-driven-ai-workers:0.1.0
+  init: true
+  restart: unless-stopped
+  user: "10001:10001"
+  read_only: true
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,nodev,size=64m
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  depends_on:
+    redis:
+      condition: service_healthy
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+services:
+  redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    # Queue data must never be evicted: at maxmemory, writes fail (the API answers
+    # 503 queue-unavailable) instead of Redis silently dropping jobs. AOF fsyncs every
+    # second, so a crash loses at most ~1s of submissions; RDB snapshots are off.
+    command:
+      - redis-server
+      - --maxmemory
+      - ${EDAW_REDIS_MAXMEMORY:-256mb}
+      - --maxmemory-policy
+      - noeviction
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - everysec
+      - --save
+      - ""
+      - --protected-mode
+      - "no"  # reachable only on the internal backend network
+    # The image's redis user: running as it directly skips the entrypoint's
+    # chown/su-exec, which would need capabilities.
+    user: "999:1000"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    volumes:
+      - redis-data:/data
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      start_period: 5s
+      retries: 10
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 384m
+          pids: 64
+    stop_grace_period: 10s
+
+  api:
+    <<: *app
+    command: ["api"]
+    # Loopback by default; set EDAW_BIND=0.0.0.0 to expose on all interfaces.
+    ports:
+      - "${EDAW_BIND:-127.0.0.1}:8000:8000"
+    environment:
+      <<: *queue-env
+      EDAW_API_CORS_ORIGINS: ${EDAW_API_CORS_ORIGINS:-[]}
+      EDAW_API_METRICS_ENABLED: ${EDAW_API_METRICS_ENABLED:-true}
+      EDAW_GUARDRAILS_MAX_PAYLOAD_BYTES: ${EDAW_GUARDRAILS_MAX_PAYLOAD_BYTES:-1048576}
+      EDAW_GUARDRAILS_MAX_DOCUMENT_CHARS: ${EDAW_GUARDRAILS_MAX_DOCUMENT_CHARS:-200000}
+      EDAW_GUARDRAILS_MAX_QUEUE_DEPTH: ${EDAW_GUARDRAILS_MAX_QUEUE_DEPTH:-10000}
+      EDAW_GUARDRAILS_BACKPRESSURE_RETRY_AFTER_S: ${EDAW_GUARDRAILS_BACKPRESSURE_RETRY_AFTER_S:-5}
+    networks:
+      - backend
+      - edge
+    # 200 while Redis answers (a missing worker heartbeat is "degraded", still 200);
+    # 503 when Redis is unreachable.
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=4).status == 200 else 1)"
+      interval: 15s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512m
+          pids: 256
+    stop_grace_period: 15s
+
+  worker:
+    <<: *app
+    command: ["worker"]
+    env_file:
+      - path: .env
+        required: false
+    # Ephemeral loopback host port, so `--scale worker=N` does not collide.
+    ports:
+      - "${EDAW_BIND:-127.0.0.1}::9100"
+    environment:
+      <<: *queue-env
+      EDAW_WORKER_MAX_JOBS: ${EDAW_WORKER_MAX_JOBS:-10}
+      EDAW_WORKER_TASK_TIMEOUT_S: ${EDAW_WORKER_TASK_TIMEOUT_S:-120}
+      EDAW_LLM_MODE: ${EDAW_LLM_MODE:-simulated}
+      EDAW_LLM_MODEL: ${EDAW_LLM_MODEL:-claude-opus-5-5}
+    networks:
+      - backend
+      - edge  # egress to the LLM API in live mode
+    # The metrics listener shares the worker's event loop: answering proves it is alive.
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:9100/metrics', timeout=4).status == 200 else 1)"
+      interval: 15s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512m
+          pids: 256
+    # SIGTERM cancels in-flight jobs; arq re-queues them for the next worker.
+    stop_grace_period: 15s
+
+networks:
+  # Redis lives here only: no route in or out of the host.
+  backend:
+    driver: bridge
+    internal: true
+  edge:
+    driver: bridge
+
+volumes:
+  redis-data:

@@ -39,6 +39,8 @@ dev = [
   "ruff>=0.8",
   "bandit[toml]>=1.8",
   "fakeredis[lua]>=2.26",
+  "pyyaml>=6.0",
+  "types-pyyaml>=6.0",
 ]
 
 [tool.uv]
