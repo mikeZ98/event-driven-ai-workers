@@ -130,6 +130,24 @@ def _stop_on_signals(stop: asyncio.Event) -> Iterator[None]:
             loop.remove_signal_handler(sig)
 
 
+async def close_worker(worker: Worker) -> None:
+    """``Worker.close()``, safe while jobs are still being finished.
+
+    arq's ``close()`` cancels in-flight jobs, then gathers them without
+    ``return_exceptions``: a job cancelled while arq records its outcome (a shielded
+    ``finish_job``) re-raises ``CancelledError`` out of ``close()``, which then skips
+    deleting the heartbeat key and ``on_shutdown`` (the LLM client, the queue-depth
+    sampler). Cancelling and reaping the jobs first leaves ``close()`` nothing to gather.
+    Cancelled jobs stay queued and are retried (the retry budget keeps headroom).
+    """
+    jobs = list(worker.tasks.values())
+    for job in jobs:
+        job.cancel()
+    await asyncio.gather(*jobs, return_exceptions=True)
+    worker.tasks.clear()
+    await worker.close()
+
+
 async def run_worker(
     handlers: HandlerFactory = summarization_handlers,
     *,
@@ -165,6 +183,6 @@ async def run_worker(
                     main.cancel()
                     with contextlib.suppress(asyncio.CancelledError):
                         await main
-                await arq_worker.close()
+                await close_worker(arq_worker)
             if not main.cancelled():
                 main.result()  # surface a crash, e.g. Redis unreachable at startup

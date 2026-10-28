@@ -7,7 +7,8 @@ import shutil
 import signal
 import socket
 import tempfile
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator, Mapping
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,7 @@ import fakeredis
 import httpx
 import pytest
 import uvicorn
+from arq.worker import Worker
 from prometheus_client import CollectorRegistry, Counter
 from redis.exceptions import ConnectionError as RedisConnectionError
 from uvicorn.importer import import_from_string
@@ -23,12 +25,19 @@ from event_driven_ai_workers import cli, worker_main
 from event_driven_ai_workers.api import create_app
 from event_driven_ai_workers.core import (
     RedisTaskStateStore,
+    TaskHandler,
     WorkerSettings,
+    create_worker_settings,
     enqueue_task,
     health_check_key,
 )
-from event_driven_ai_workers.schemas import TaskStatus
-from event_driven_ai_workers.worker_main import MetricsServerSettings, run_worker, serve_metrics
+from event_driven_ai_workers.schemas import TaskStatus, TaskType
+from event_driven_ai_workers.worker_main import (
+    MetricsServerSettings,
+    close_worker,
+    run_worker,
+    serve_metrics,
+)
 from tests.conftest import make_pool
 from tests.support import make_task
 
@@ -202,6 +211,63 @@ class TestRunWorker:
                 metrics=MetricsServerSettings(enabled=False),
                 redis_pool=make_pool(redis_server),
             )
+
+
+class TestCloseWorker:
+    """arq's ``close()`` breaks on a job that ends cancelled; ``close_worker`` does not."""
+
+    @staticmethod
+    async def _started_worker(
+        server: fakeredis.FakeServer, settings: WorkerSettings, closed: list[bool]
+    ) -> Worker:
+        @asynccontextmanager
+        async def handlers() -> AsyncIterator[Mapping[TaskType, TaskHandler]]:
+            try:
+                yield {}
+            finally:
+                closed.append(True)
+
+        options = create_worker_settings(handlers, worker=settings)
+        worker = Worker(
+            **options,
+            redis_pool=make_pool(server),
+            burst=True,
+            poll_delay=0.005,
+            handle_signals=False,
+        )
+        await worker.main()  # startup + one poll on an empty queue: heartbeat written
+        # A job still finishing when shutdown cancels it.
+        worker.tasks["finishing"] = asyncio.create_task(asyncio.Event().wait())
+        await asyncio.sleep(0)
+        return worker
+
+    async def test_arq_close_alone_leaks_the_shutdown(
+        self, redis_server: fakeredis.FakeServer, fast_settings: WorkerSettings
+    ) -> None:
+        closed: list[bool] = []
+        worker = await self._started_worker(redis_server, fast_settings, closed)
+
+        with pytest.raises(asyncio.CancelledError):
+            await worker.close()
+
+        assert closed == []  # on_shutdown never ran: if this fails, arq fixed close()
+        worker.tasks.clear()
+        await worker.close()
+
+    async def test_close_worker_completes_the_shutdown(
+        self, redis_server: fakeredis.FakeServer, fast_settings: WorkerSettings
+    ) -> None:
+        closed: list[bool] = []
+        inspect = make_pool(redis_server)
+        worker = await self._started_worker(redis_server, fast_settings, closed)
+        assert await inspect.exists(health_check_key(fast_settings.queue_name))
+
+        await close_worker(worker)
+
+        assert closed == [True]
+        assert worker.tasks == {}
+        assert not await inspect.exists(health_check_key(fast_settings.queue_name))
+        await inspect.aclose()
 
 
 class TestCli:
