@@ -22,6 +22,7 @@ dependencies = [
   "httpx>=0.28",
   "tenacity>=9.0",
   "structlog>=24.4",
+  "pydantic-settings>=2.6",
 ]
 
 [dependency-groups]
@@ -33,6 +34,7 @@ dev = [
   "mypy>=1.13",
   "ruff>=0.8",
   "bandit[toml]>=1.8",
+  "fakeredis>=2.26",
 ]
 
 [tool.uv]
@@ -120,6 +122,8 @@ filterwarnings = [
   "error",
   # pytest-socket warns before raising SocketBlockedError; let the error surface instead.
   "ignore:A test tried to use socket.socket.:UserWarning",
+  # arq 0.28 Worker.close() still calls redis-py's deprecated close(); not our code.
+  "ignore:Call to deprecated close.:DeprecationWarning:arq.worker",
 ]
 
 [tool.coverage.run]
