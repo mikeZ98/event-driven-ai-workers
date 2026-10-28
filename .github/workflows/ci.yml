@@ -1,0 +1,218 @@
+# event-driven-ai-workers CI.
+#
+#   audit ─┬─ quality ─┬─ docker
+#          └─ test ────┘
+#
+# Every third-party action is pinned to a full commit SHA (tag in the trailing comment);
+# tests/test_ci.py enforces that, the job graph and every gate below.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  # Supersede stale runs on PRs and branches; never cancel a run on main.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+env:
+  # Kept equal to the Dockerfile's UV_VERSION and .python-version (tests/test_ci.py).
+  UV_VERSION: "0.11.7"
+  PYTHON_VERSION: "3.13"
+  UV_FROZEN: "1"
+  FORCE_COLOR: "1"
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  audit:
+    name: audit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out full history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          # Audit the real branch head: a PR's synthetic merge commit is committed by
+          # GitHub itself and would (correctly) fail the sole-contributor invariant.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Audit authors, committers and messages
+        run: scripts/audit-attribution.sh HEAD
+
+  quality:
+    name: quality
+    needs: audit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Installs uv and Python 3.13; the cache is keyed on the lockfile hash.
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install locked dependencies
+        run: uv sync --frozen
+
+      - name: Ruff lint
+        run: uv run ruff check --output-format=github .
+
+      - name: Ruff format
+        run: uv run ruff format --check .
+
+      - name: Mypy (strict)
+        run: uv run mypy --strict src tests
+
+      - name: Bandit
+        run: uv run bandit -c pyproject.toml -r src
+
+  test:
+    name: test
+    needs: audit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install locked dependencies
+        run: uv sync --frozen
+
+      # Hermetic: pyproject addopts apply --disable-socket (pytest-socket) to every
+      # test, Redis is fakeredis and the LLM a MockTransport; tests/test_ci.py asserts
+      # that outbound sockets fail.
+      - name: Pytest (unit, integration, e2e; branch coverage >= 90%)
+        run: |
+          mkdir -p .cache/coverage
+          uv run pytest tests/ \
+            --cov=src/event_driven_ai_workers --cov-branch --cov-fail-under=90 \
+            --cov-report=xml --cov-report=term
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: coverage-xml
+          path: coverage.xml
+          retention-days: 14
+          if-no-files-found: ignore
+
+  docker:
+    name: docker
+    needs: [quality, test]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      # The tag docker-compose.yml runs, so the smoke test uses the image built here.
+      IMAGE: event-driven-ai-workers:0.1.0
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      # Plant what must never reach the daemon, dump the context the build would see,
+      # and require exactly the four allowed entries.
+      - name: Validate .dockerignore context isolation
+        run: |
+          set -euo pipefail
+          mkdir -p .cache/leak src/event_driven_ai_workers/__pycache__
+          echo "EDAW_LLM_API_KEY=decoy" > .env
+          echo decoy > .cache/leak/secret
+          echo decoy > src/event_driven_ai_workers/__pycache__/decoy.cpython-313.pyc
+          # The probe copies "everything" on purpose; skip buildx's CopyIgnoredFile lint.
+          printf '# check=skip=CopyIgnoredFile\nFROM scratch\nCOPY . /\n' |
+            docker buildx build --file - --output type=local,dest="$RUNNER_TEMP/context" .
+          actual="$(find "$RUNNER_TEMP/context" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort | paste -sd' ' -)"
+          echo "build context: $actual"
+          test "$actual" = "README.md pyproject.toml src uv.lock"
+          test -z "$(find "$RUNNER_TEMP/context" -name '__pycache__' -o -name '*.pyc')"
+          rm -rf .env .cache/leak src/event_driven_ai_workers/__pycache__
+
+      - name: Build runtime image (Buildx)
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: Dockerfile
+          target: runtime
+          push: false
+          load: true
+          # Attestations would turn the result into a manifest list the docker
+          # exporter cannot load; supply-chain metadata belongs to a release job.
+          provenance: false
+          sbom: false
+          tags: ${{ env.IMAGE }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Assert non-root user and minimal runtime
+        run: |
+          set -euo pipefail
+          test "$(docker image inspect --format '{{.Config.User}}' "$IMAGE")" = "10001:10001"
+          test "$(docker image inspect --format '{{json .Config.Entrypoint}}' "$IMAGE")" = '["edaw"]'
+          test "$(docker run --rm --entrypoint id "$IMAGE" -un)" = "edaw"
+          test "$(docker run --rm --entrypoint id "$IMAGE" -u)" = "10001"
+          test "$(docker run --rm --entrypoint id "$IMAGE" -g)" = "10001"
+          docker run --rm --read-only --cap-drop ALL --security-opt no-new-privileges:true \
+            --entrypoint python "$IMAGE" -c '
+          import importlib.util, os, shutil, sys
+          problems = [m for m in ("pip", "ensurepip") if importlib.util.find_spec(m)]
+          problems += [b for b in ("pip", "pip3", "uv", "gcc", "cc", "curl", "wget") if shutil.which(b)]
+          if os.access("/app/.venv", os.W_OK):
+              problems.append("venv writable by edaw")
+          import event_driven_ai_workers
+          sys.exit(f"runtime image problems: {problems}" if problems else 0)
+          '
+          docker run --rm "$IMAGE" --version
+
+      - name: Validate compose file
+        run: docker compose -f docker-compose.yml config --quiet
+
+      - name: Start the compose stack
+        run: docker compose up -d --no-build --wait --wait-timeout 120
+
+      - name: Smoke test producer -> Redis -> worker -> client
+        run: scripts/smoke-compose.sh
+
+      - name: Workers stop cleanly on SIGTERM
+        run: |
+          set -euo pipefail
+          docker compose stop --timeout 15 worker
+          code="$(docker inspect --format '{{.State.ExitCode}}' "$(docker compose ps -aq worker)")"
+          echo "worker exit code: $code"
+          test "$code" = "0"
+
+      - name: Stack logs
+        if: always()
+        run: docker compose logs --no-color || true
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v || true
