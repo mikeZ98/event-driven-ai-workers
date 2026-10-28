@@ -23,7 +23,11 @@ dependencies = [
   "tenacity>=9.0",
   "structlog>=24.4",
   "pydantic-settings>=2.6",
+  "uvicorn[standard]>=0.32",
 ]
+
+[project.scripts]
+edaw = "event_driven_ai_workers.cli:main"
 
 [dependency-groups]
 dev = [

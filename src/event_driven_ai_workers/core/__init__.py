@@ -34,6 +34,7 @@ from event_driven_ai_workers.core.worker import (
     WorkerRuntime,
     create_worker_settings,
     enqueue_task,
+    health_check_key,
 )
 
 __all__ = [
@@ -66,5 +67,6 @@ __all__ = [
     "classify_status",
     "create_worker_settings",
     "enqueue_task",
+    "health_check_key",
     "parse_retry_after",
 ]

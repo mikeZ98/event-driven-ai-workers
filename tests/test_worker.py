@@ -21,6 +21,7 @@ from event_driven_ai_workers.core import (
     WorkerSettings,
     create_worker_settings,
     enqueue_task,
+    health_check_key,
 )
 from event_driven_ai_workers.core.ports import resolve
 from event_driven_ai_workers.schemas import (
@@ -92,8 +93,7 @@ async def test_completed_task_round_trips_as_json(
     assert result.status is TaskStatus.COMPLETED
     assert result.result == {"summary": "summary of doc-1"}
     assert await _store(arq_pool, fast_settings).get(task.task_id) == result
-    # jobs_complete also counts the queue-depth cron run at startup.
-    assert (worker.jobs_retried, worker.jobs_failed) == (0, 0)
+    assert (worker.jobs_complete, worker.jobs_retried, worker.jobs_failed) == (1, 0, 0)
     assert script.opened
     assert script.closed
 
@@ -176,8 +176,26 @@ async def test_queue_depth_is_sampled_at_startup(
     observer = RecordingObserver()
     await _run(arq_pool, Script(), fast_settings, observer)
     depths = [e for e in observer.events if e[0] == "queue_depth"]
-    assert depths
-    assert depths[0][1] == fast_settings.queue_name
+    # The sampler is not an arq job, so it neither counts itself nor needs a job slot.
+    assert depths[0] == ("queue_depth", fast_settings.queue_name, 2)
+
+
+async def test_queue_depth_sampling_survives_redis_outage(
+    arq_pool: ArqRedis, fast_settings: WorkerSettings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    observer = RecordingObserver()
+    runtime = WorkerRuntime(Script().factory, settings=fast_settings, observer=observer)
+    await enqueue_task(arq_pool, make_task(), queue_name=fast_settings.queue_name)
+
+    async def _down(*_: object) -> int:
+        raise RedisConnectionError("down")
+
+    with monkeypatch.context() as patched:
+        patched.setattr(arq_pool, "zcard", _down)
+        assert await runtime.sample_queue_depth(arq_pool) is None
+    assert await runtime.sample_queue_depth(arq_pool) == 1
+
+    assert observer.events == [("queue_depth", fast_settings.queue_name, 1)]
 
 
 def test_worker_options_follow_settings() -> None:
@@ -189,6 +207,8 @@ def test_worker_options_follow_settings() -> None:
     assert options["max_jobs"] == 7
     assert options["max_tries"] == settings.arq_max_tries
     assert options["redis_settings"].host == "r"
+    assert options["health_check_key"] == health_check_key("jobs") == "jobs:health-check"
+    assert options["health_check_interval"] == settings.health_check_interval_s
     [function] = options["functions"]
     assert function.name == TASK_FUNCTION
     assert function.max_tries == settings.arq_max_tries

@@ -4,15 +4,18 @@ Tasks cross Redis as ``TaskPayload.model_dump_json()`` strings and results come 
 ``TaskResult.model_dump_json()``, so strict schemas never meet lax Python-mode coercion.
 """
 
+import asyncio
+import contextlib
 from collections.abc import Callable, Mapping
 from contextlib import AbstractAsyncContextManager, AsyncExitStack
 from typing import Any
 
 import structlog
-from arq import cron
 from arq.connections import ArqRedis
+from arq.constants import health_check_key_suffix
 from arq.jobs import Job
 from arq.worker import Retry, func
+from redis.exceptions import RedisError
 
 from event_driven_ai_workers.core.config import RedisSettings, WorkerSettings
 from event_driven_ai_workers.core.dlq import RedisDeadLetterQueue
@@ -24,7 +27,11 @@ from event_driven_ai_workers.schemas import TaskPayload, TaskType
 TASK_FUNCTION = "run_task"
 """arq function name producers enqueue; part of the wire contract."""
 
-QUEUE_DEPTH_FUNCTION = "sample_queue_depth"
+
+def health_check_key(queue_name: str) -> str:
+    """Heartbeat key every live worker on ``queue_name`` refreshes (arq's convention)."""
+    return queue_name + health_check_key_suffix
+
 
 HandlerFactory = Callable[[], AbstractAsyncContextManager[Mapping[TaskType, TaskHandler]]]
 """Opens the workload handlers (and their HTTP clients) for the worker's lifetime."""
@@ -65,6 +72,8 @@ class WorkerRuntime:
             settings=self._settings,
             observer=self._observer,
         )
+        sampler = asyncio.create_task(self._sample_queue_depth_forever(redis))
+        stack.push_async_callback(_cancel, sampler)
         _log.info("worker.started", queue=self._settings.queue_name, task_types=sorted(handlers))
 
     async def shutdown(self, ctx: WorkerContext) -> None:
@@ -82,12 +91,29 @@ class WorkerRuntime:
             raise Retry(defer=outcome.delay_s)
         return outcome.model_dump_json()
 
-    async def sample_queue_depth(self, ctx: WorkerContext) -> int:
-        """arq cron: publish the number of queued (incl. deferred) jobs."""
-        redis: ArqRedis = ctx["redis"]
-        depth: int = await resolve(redis.zcard(self._settings.queue_name))
+    async def sample_queue_depth(self, redis: ArqRedis) -> int | None:
+        """Publish the queue's length (deferred retries and in-flight jobs included).
+
+        Returns ``None`` when Redis is unreachable; the gauge keeps its last value.
+        """
+        try:
+            depth: int = await resolve(redis.zcard(self._settings.queue_name))
+        except (RedisError, OSError) as exc:
+            _log.warning("worker.queue_depth_failed", error=type(exc).__name__)
+            return None
         self._observer.queue_depth(self._settings.queue_name, depth)
         return depth
+
+    async def _sample_queue_depth_forever(self, redis: ArqRedis) -> None:
+        """Sample now, then every ``queue_depth_sample_s``.
+
+        A plain task beside arq rather than an arq cron job: a job would count itself
+        in the queue it measures, and could not run while every ``max_jobs`` slot is
+        busy, which is exactly when the backlog matters.
+        """
+        while True:
+            await self.sample_queue_depth(redis)
+            await asyncio.sleep(self._settings.queue_depth_sample_s)
 
 
 def create_worker_settings(
@@ -101,7 +127,6 @@ def create_worker_settings(
     worker = worker or WorkerSettings()
     redis = redis or RedisSettings()
     runtime = WorkerRuntime(handlers, settings=worker, observer=observer)
-    step = worker.queue_depth_sample_s
     return {
         "functions": [
             func(
@@ -109,16 +134,6 @@ def create_worker_settings(
                 name=TASK_FUNCTION,
                 max_tries=worker.arq_max_tries,
                 timeout=worker.arq_job_timeout_s,
-            )
-        ],
-        "cron_jobs": [
-            cron(
-                runtime.sample_queue_depth,
-                name=QUEUE_DEPTH_FUNCTION,
-                second=set(range(0, 60, step)),
-                run_at_startup=True,
-                unique=False,  # every worker refreshes its own gauge
-                max_tries=1,
             )
         ],
         "on_startup": runtime.startup,
@@ -129,7 +144,15 @@ def create_worker_settings(
         "job_timeout": worker.arq_job_timeout_s,
         "max_tries": worker.arq_max_tries,
         "keep_result": worker.state_ttl_s,
+        "health_check_interval": worker.health_check_interval_s,
+        "health_check_key": health_check_key(worker.queue_name),
     }
+
+
+async def _cancel(task: asyncio.Task[None]) -> None:
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
 
 
 async def enqueue_task(pool: ArqRedis, task: TaskPayload, *, queue_name: str) -> Job | None:

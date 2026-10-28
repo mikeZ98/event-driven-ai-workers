@@ -88,6 +88,9 @@ class WorkerSettings(BaseSettings):
 
     queue_depth_sample_s: int = Field(default=15, ge=1, le=60)
 
+    health_check_interval_s: int = Field(default=10, ge=1, le=3_600)
+    """How often workers refresh the heartbeat key the producer's readiness probe reads."""
+
     @model_validator(mode="after")
     def _check_consistency(self) -> Self:
         if self.backoff_max_s < self.backoff_base_s:

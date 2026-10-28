@@ -8,7 +8,7 @@ from event_driven_ai_workers.tools.llm_client import (
     UpstreamContractError,
     open_llm_client,
 )
-from event_driven_ai_workers.tools.metrics import WorkerMetrics
+from event_driven_ai_workers.tools.metrics import WorkerMetrics, create_registry
 from event_driven_ai_workers.tools.summarizer import SummarizationRunner, summarization_handlers
 
 __all__ = [
@@ -19,6 +19,7 @@ __all__ = [
     "SummarizationRunner",
     "UpstreamContractError",
     "WorkerMetrics",
+    "create_registry",
     "open_llm_client",
     "summarization_handlers",
 ]

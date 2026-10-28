@@ -5,13 +5,34 @@ Exposition names: ``arq_queued_tasks``, ``arq_task_latency_{bucket,sum,count}``,
 to counters). Every label is drawn from a bounded enum, so cardinality stays fixed.
 """
 
-from prometheus_client import REGISTRY, CollectorRegistry, Counter, Gauge, Histogram
+from prometheus_client import (
+    REGISTRY,
+    CollectorRegistry,
+    Counter,
+    Gauge,
+    GCCollector,
+    Histogram,
+    PlatformCollector,
+    ProcessCollector,
+)
 
 from event_driven_ai_workers.core import DeadLetterReason, ErrorClass, FailureClassification
 from event_driven_ai_workers.schemas import TaskPayload, TaskStatus
 
 LATENCY_BUCKETS_S = (0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0)
 """LLM workloads run for seconds to minutes; default buckets stop at 10s."""
+
+
+def create_registry() -> CollectorRegistry:
+    """A private registry with the process, platform and GC collectors the default one has.
+
+    Each app or worker owns its registry, so several can coexist in one process (tests).
+    """
+    registry = CollectorRegistry()
+    ProcessCollector(registry=registry)
+    PlatformCollector(registry=registry)
+    GCCollector(registry=registry)
+    return registry
 
 
 class WorkerMetrics:
@@ -25,7 +46,7 @@ class WorkerMetrics:
         registry = REGISTRY if registry is None else registry
         self.queued_tasks = Gauge(
             "arq_queued_tasks",
-            "Jobs waiting in the arq queue, including deferred retries.",
+            "Jobs in the arq queue, including deferred retries and jobs in progress.",
             ["queue"],
             registry=registry,
         )
