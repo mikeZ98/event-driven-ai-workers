@@ -38,7 +38,7 @@ dev = [
   "mypy>=1.13",
   "ruff>=0.8",
   "bandit[toml]>=1.8",
-  "fakeredis>=2.26",
+  "fakeredis[lua]>=2.26",
 ]
 
 [tool.uv]

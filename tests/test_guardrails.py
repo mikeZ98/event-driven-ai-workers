@@ -1,5 +1,6 @@
 """Ingestion guardrails: bounded body reads, size and content screening, queue backpressure."""
 
+import asyncio
 import json
 from collections.abc import AsyncIterator
 from typing import Any
@@ -10,6 +11,7 @@ from pydantic import ValidationError
 
 from event_driven_ai_workers.core import WorkerSettings, enqueue_task
 from event_driven_ai_workers.guardrails import (
+    RESERVATION_TTL_S,
     Backpressure,
     DocumentTooLargeError,
     GuardrailSettings,
@@ -17,10 +19,11 @@ from event_driven_ai_workers.guardrails import (
     PayloadTooLargeError,
     QueueSaturatedError,
     RejectedContentError,
+    reservations_key,
 )
 from event_driven_ai_workers.schemas import MAX_DOCUMENT_CHARS
 from tests.conftest import ApiFactory, ApiHarness
-from tests.support import make_task
+from tests.support import FakeClock, make_task
 from tests.test_api import BODY, SUMMARIZE, _problem, _submit
 
 SMALL = GuardrailSettings(max_payload_bytes=1_024, max_document_chars=100)
@@ -170,23 +173,91 @@ class TestPayloadScreening:
 
 
 class TestBackpressure:
+    @staticmethod
+    def _backpressure(
+        pool: ArqRedis, settings: WorkerSettings, limit: int, clock: FakeClock | None = None
+    ) -> Backpressure:
+        return Backpressure(
+            pool,
+            queue_name=settings.queue_name,
+            settings=GuardrailSettings(max_queue_depth=limit, backpressure_retry_after_s=9),
+            clock=clock or FakeClock(),
+        )
+
     async def test_admits_below_and_refuses_at_threshold(
         self, arq_pool: ArqRedis, fast_settings: WorkerSettings
     ) -> None:
-        settings = GuardrailSettings(max_queue_depth=2, backpressure_retry_after_s=9)
-        backpressure = Backpressure(
-            arq_pool, queue_name=fast_settings.queue_name, settings=settings
-        )
+        backpressure = self._backpressure(arq_pool, fast_settings, limit=2)
 
-        await backpressure.admit()
-        await _fill(arq_pool, fast_settings, 1)
-        await backpressure.admit()
-        await _fill(arq_pool, fast_settings, 1, start=1)
+        async with backpressure.admission("a"):
+            await _fill(arq_pool, fast_settings, 1)
+        async with backpressure.admission("b"):
+            await _fill(arq_pool, fast_settings, 1, start=1)
 
         with pytest.raises(QueueSaturatedError) as saturated:
-            await backpressure.admit()
+            async with backpressure.admission("c"):
+                pass  # pragma: no cover
         assert (saturated.value.depth, saturated.value.limit) == (2, 2)
         assert saturated.value.retry_after_s == 9
+        assert await arq_pool.zcard(reservations_key(fast_settings.queue_name)) == 0
+
+    async def test_held_reservations_count_toward_depth(
+        self, arq_pool: ArqRedis, fast_settings: WorkerSettings
+    ) -> None:
+        backpressure = self._backpressure(arq_pool, fast_settings, limit=1)
+
+        async with backpressure.admission("first"):
+            with pytest.raises(QueueSaturatedError):
+                async with backpressure.admission("second"):
+                    pass  # pragma: no cover
+        async with backpressure.admission("third"):
+            pass
+
+    async def test_reservation_is_released_when_the_submission_fails(
+        self, arq_pool: ArqRedis, fast_settings: WorkerSettings
+    ) -> None:
+        backpressure = self._backpressure(arq_pool, fast_settings, limit=1)
+
+        with pytest.raises(RuntimeError, match="enqueue failed"):
+            async with backpressure.admission("doomed"):
+                raise RuntimeError("enqueue failed")
+
+        assert await arq_pool.zcard(reservations_key(fast_settings.queue_name)) == 0
+
+    async def test_stale_reservation_expires(
+        self, arq_pool: ArqRedis, fast_settings: WorkerSettings
+    ) -> None:
+        clock = FakeClock()
+        backpressure = self._backpressure(arq_pool, fast_settings, limit=1, clock=clock)
+        crashed_producer = backpressure.admission("crashed")
+        await crashed_producer.__aenter__()  # never exits: the producer died mid-submit
+
+        with pytest.raises(QueueSaturatedError):
+            async with backpressure.admission("too-soon"):
+                pass  # pragma: no cover
+        clock.advance(RESERVATION_TTL_S + 1)
+        async with backpressure.admission("after-expiry"):
+            pass
+
+    async def test_concurrent_burst_never_exceeds_the_limit(
+        self, arq_pool: ArqRedis, fast_settings: WorkerSettings
+    ) -> None:
+        backpressure = self._backpressure(arq_pool, fast_settings, limit=5)
+        release = asyncio.Event()
+
+        async def _submit_one(member: str) -> bool:
+            try:
+                async with backpressure.admission(member):
+                    await release.wait()  # every admitted submission is still in flight
+            except QueueSaturatedError:
+                return False
+            return True
+
+        burst = [asyncio.create_task(_submit_one(f"burst-{i}")) for i in range(40)]
+        await asyncio.sleep(0.05)
+        release.set()
+
+        assert sum(await asyncio.gather(*burst)) == 5
 
 
 class TestSizeGuardrailsOverHttp:

@@ -1,6 +1,11 @@
 """Ingestion guardrails: body size and content limits, and queue backpressure."""
 
-from event_driven_ai_workers.guardrails.backpressure import Backpressure, QueueSaturatedError
+from event_driven_ai_workers.guardrails.backpressure import (
+    RESERVATION_TTL_S,
+    Backpressure,
+    QueueSaturatedError,
+    reservations_key,
+)
 from event_driven_ai_workers.guardrails.config import GuardrailSettings
 from event_driven_ai_workers.guardrails.payload_guard import (
     DocumentTooLargeError,
@@ -10,6 +15,7 @@ from event_driven_ai_workers.guardrails.payload_guard import (
 )
 
 __all__ = [
+    "RESERVATION_TTL_S",
     "Backpressure",
     "DocumentTooLargeError",
     "GuardrailSettings",
@@ -17,4 +23,5 @@ __all__ = [
     "PayloadTooLargeError",
     "QueueSaturatedError",
     "RejectedContentError",
+    "reservations_key",
 ]

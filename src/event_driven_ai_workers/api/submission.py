@@ -6,9 +6,9 @@ re-drives ``enqueue_task`` while the task is still ``PENDING``: that is a no-op 
 arq job exists (its id is the idempotency key) and heals a submission interrupted
 between claiming the key and enqueueing.
 
-New submissions pass the backpressure check before claiming the key, so a refused
-request leaves the key free for its retry, and replays are still served while the
-queue is saturated.
+New submissions reserve a queue slot (atomic backpressure admission) before claiming
+the key and hold it until the job is queued, so a refused request leaves the key free
+for its retry, and replays are still served while the queue is saturated.
 """
 
 import contextlib
@@ -104,8 +104,12 @@ class TaskSubmitter:
         Raises :class:`~event_driven_ai_workers.guardrails.QueueSaturatedError` while the
         queue is full.
         """
-        if self._backpressure is not None:
-            await self._backpressure.admit()
+        if self._backpressure is None:
+            return await self._claim_and_enqueue(task, request_fingerprint)
+        async with self._backpressure.admission(str(task.task_id)):
+            return await self._claim_and_enqueue(task, request_fingerprint)
+
+    async def _claim_and_enqueue(self, task: TaskPayload, request_fingerprint: str) -> Submission:
         key = self._key(task.idempotency_key)
         record = IdempotencyRecord(fingerprint=request_fingerprint, task=task)
         claimed: bool | None = await resolve(
