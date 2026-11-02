@@ -441,7 +441,7 @@ audit ─┬─ quality ─┬─ docker
 ## Contributing
 
 Every commit must be authored *and* committed by
-`mikeZ98 <145975972+mikeZ98@users.noreply.github.com>` with no AI attribution trailers.
+`mikeZ98 <145975972+mikeZ98@users.noreply.github.com>`; AI-assistance trailers are allowed.
 `.githooks/` enforces this locally (`direnv allow` installs them), and
 `scripts/audit-attribution.sh` audits the full history in CI. Commits follow
 Conventional Commits, one concern per commit, and must pass every gate in

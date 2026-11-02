@@ -1,4 +1,4 @@
-"""Git identity policy: sole contributor, no AI attribution, enforced by .githooks.
+"""Git identity policy: sole contributor, enforced by .githooks. Trailers are not policed.
 
 Each test drives the real hooks and audit script inside a throwaway repository with
 an isolated git configuration, so the developer's own settings never leak in.
@@ -128,11 +128,12 @@ class TestCommitHooks:
             "feat: x\n\nReviewed-by: Other Person <other@example.com>",
         ],
     )
-    def test_ai_attribution_and_foreign_trailers_are_rejected(
+    def test_ai_attribution_and_co_author_trailers_are_accepted(
         self, repo: Path, message: str
     ) -> None:
-        assert not _commit(repo, message)
-        assert _count(repo) == 0
+        # Only the recorded author/committer is enforced; disclosing assistance is allowed.
+        assert _commit(repo, message)
+        assert _count(repo) == 1
 
     @pytest.mark.parametrize(
         "message",
@@ -206,18 +207,9 @@ class TestAuditScript:
         assert proc.returncode == 0
         assert "3 commit(s) scanned" in proc.stderr
 
-    @pytest.mark.parametrize(
-        ("message", "extra"),
-        [
-            ("feat: x\n\nCo-Authored-By: Claude <noreply@anthropic.com>", ()),
-            ("feat: x", ("--author=Someone <someone@example.com>",)),
-        ],
-    )
-    def test_bypassed_violation_is_caught(
-        self, repo: Path, message: str, extra: tuple[str, ...]
-    ) -> None:
+    def test_bypassed_violation_is_caught(self, repo: Path) -> None:
         assert _commit(repo, "feat: clean base")
-        self._bypass(repo, message, *extra)
+        self._bypass(repo, "feat: x", "--author=Someone <someone@example.com>")
         assert _commit(repo, "feat: clean tip")
         proc = _run(repo, "bash", AUDIT)
         assert proc.returncode == 1
@@ -266,10 +258,10 @@ class TestPrePush:
     def test_push_with_bypassed_violation_is_rejected(self, repo: Path, remote: Path) -> None:
         assert _commit(repo, "feat: x")
         assert _run(repo, "git", "push", "-q", "origin", "main").returncode == 0
-        assert _commit(repo, "feat: y\n\nGenerated-by: tool", "--no-verify")
+        assert _commit(repo, "feat: y", "--no-verify", "--author=Bot <bot@example.com>")
         proc = _run(repo, "git", "push", "-q", "origin", "main")
         assert proc.returncode != 0
-        assert re.search(r"forbidden AI attribution", proc.stderr)
+        assert re.search(r"violates the sole-contributor invariant", proc.stderr)
         assert _git(remote, "rev-list", "--count", "main") == "1"
 
     @pytest.mark.usefixtures("remote")

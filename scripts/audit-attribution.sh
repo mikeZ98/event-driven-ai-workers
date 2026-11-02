@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Audit commits for the sole-contributor + no-AI-attribution invariant.
+# Audit commits for the sole-contributor identity invariant (author + committer).
 #
 # Usage: scripts/audit-attribution.sh [<git rev-list args>...]   (default: HEAD)
 # Used by .githooks/pre-push locally and by CI.
@@ -41,7 +41,6 @@ while IFS= read -r sha; do
   short="${sha:0:12}"
   policy_check_identity "[$short] Author" "$an" "$ae" || fail=1
   policy_check_identity "[$short] Committer" "$cn" "$ce" || fail=1
-  policy_check_message "$(git log -1 --format=%B "$sha")" || { policy_err "  ↳ in commit $short"; fail=1; }
 done <<<"$shas"
 
 if ((fail)); then
