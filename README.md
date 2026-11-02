@@ -8,7 +8,7 @@ result. Ingestion guardrails and atomic backpressure keep traffic spikes from re
 Redis or the workers.
 
 Python 3.13 · FastAPI · arq · Redis 7 · Pydantic v2 (strict) · Prometheus ·
-`mypy --strict` · 99.9% branch coverage, hermetic test suite.
+`mypy --strict` · 493 hermetic tests at 99.9% branch coverage.
 
 ## Contents
 
