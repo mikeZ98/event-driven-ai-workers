@@ -1,5 +1,12 @@
 # event-driven-ai-workers
 
+[![CI](https://github.com/mikeZ98/event-driven-ai-workers/actions/workflows/ci.yml/badge.svg)](https://github.com/mikeZ98/event-driven-ai-workers/actions/workflows/ci.yml)
+[![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](pyproject.toml)
+[![Ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](pyproject.toml)
+[![mypy strict](https://img.shields.io/badge/types-mypy%20strict-blue.svg)](pyproject.toml)
+[![Network-free tests](https://img.shields.io/badge/network--free-pytest--socket-brightgreen.svg)](pyproject.toml)
+[![Committer mikeZ98](https://img.shields.io/badge/committer-mikeZ98-lightgrey.svg)](https://github.com/mikeZ98/event-driven-ai-workers/commits/main)
+
 Asynchronous, event-driven processing for heavy AI workloads. A FastAPI **producer**
 accepts tasks and returns immediately; **arq workers** consume them from **Redis**, call
 the LLM with retries tuned for 429/529 rate limits, quarantine poison pills in a
