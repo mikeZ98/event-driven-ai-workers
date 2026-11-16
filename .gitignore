@@ -29,3 +29,5 @@ htmlcov/
 .idea/
 .vscode/
 .claude/settings.local.json
+# pnew — secrets + SSD isolation
+.direnv/
